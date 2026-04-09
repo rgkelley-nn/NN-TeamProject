@@ -1,22 +1,22 @@
-## Halfway Progress Update (5-minute script)
+## Halfway Progress Update (5 min)
 
-Hi everyone—this is our halfway progress update for **Predictive Modeling of Hourly Energy Consumption using Gated Recurrent Architectures**
+Hi everyone—this is our halfway progress update for **Predicting Hourly Energy Consumption with LSTMs**.
 
-Our goal is to predict the next hour’s energy consumption in **Megawatts (MW)** using the PJM **AEP hourly** dataset, which contains about **121,273 hourly observations** from 2004 to 2018. In the version of the dataset we’re using right now, the CSV includes only two columns: `Datetime` and `AEP_MW`. So our current inputs are historical MW load, plus optional calendar/seasonality features derived from `Datetime` (hour-of-day, day-of-week, and day-of-year encodings).
-
----
-
-### Motivation (Why not “memoryless” models?)
-
-A key challenge is that energy load is strongly **temporal**: it depends not just on the current hour, but on patterns across the last day, week, and season. A “memoryless” model—like a plain linear regression—can’t naturally represent these lagged dependencies.
-
-A major driver of short-term dynamics is regular seasonality: daily cycles, weekly patterns, and longer annual trends. By deriving calendar features from `Datetime`, we give the model signals for these periodic effects, while the LSTM learns longer-range dependencies from the historical load sequence itself.
+Our goal is to predict the next hour’s energy consumption in **MW** using the PJM **AEP hourly** dataset (~121k hourly points, 2004–2018). The CSV we’re using has two columns: `Datetime` and `AEP_MW`. So the model uses the past load values (and optionally some time-of-day / day-of-week / day-of-year features derived from `Datetime`).
 
 ---
 
-### Methodology (LSTM + gates)
+### Motivation
 
-We’re using an **LSTM**, which is a gated recurrent architecture designed to maintain and update a memory state over time. At each time step $t$, the LSTM maintains a hidden state $h_t$ and a cell state $c_t$.
+A key challenge is that load depends on what happened recently (last few hours / last day) and also longer seasonal patterns. A “memoryless” model (like plain linear regression on a single hour) tends to miss that.
+
+A big part of the signal is seasonality: daily cycles, weekly patterns, and annual trends. We can give the model time-based features from `Datetime`, and the LSTM learns dependencies from the load sequence.
+
+---
+
+### Method
+
+We’re using an **LSTM**. At each time step $t$, it keeps a hidden state $h_t$ and a cell state $c_t$.
 
 * **Forget gate** decides what portion of the previous memory to retain:
     $$f_t = \sigma(W_f [h_{t-1}, x_t] + b_f)$$
@@ -29,17 +29,17 @@ We’re using an **LSTM**, which is a gated recurrent architecture designed to m
 
 ---
 
-### Validation (Walk-forward, no leakage)
+### Validation
 
-For evaluation, we use a walk-forward validation strategy with `TimeSeriesSplit`. The key rule is: **train on the past, validate on the future**. We evaluate with **RMSE** and **MAE**:
+For evaluation, we use walk-forward splits (`TimeSeriesSplit`): train on earlier data and validate on later data. We report **RMSE** and **MAE**:
 
 $$\text{RMSE} = \sqrt{\frac{1}{n} \sum_{j=1}^{n} (y_j - \hat{y}_j)^2}, \quad \text{MAE} = \frac{1}{n} \sum_{j=1}^{n} |y_j - \hat{y}_j|$$
 
 ---
 
-### Team Prior Work
+### Team prior work
 
-A team member previously worked with this exact dataset using a different architecture, which gave us a baseline workflow for cleaning and feature alignment. We’re building on that foundation but switching to an LSTM to capture longer-range seasonal patterns.
+One of our team members already worked with this dataset using a different architecture, so we’re building off that baseline workflow and switching to an LSTM to better handle time dependencies.
 
 ---
 

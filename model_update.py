@@ -1,12 +1,7 @@
 """
 model_update.py
 
-Halfway Progress Update script:
-- Load & preprocess PJM AEP hourly load data.
-- Create sliding-window sequences for next-hour forecasting.
-- Implement an LSTM with explicit cell-state c(t) tracking.
-- Evaluate with walk-forward validation (TimeSeriesSplit) to avoid leakage.
-- Report RMSE/MAE and generate plots (Predicted vs Actual, Loss Curve).
+Train/eval script for next-hour AEP load forecasting (PyTorch LSTM).
 
 Expected input file (if available):
   data/AEP_hourly.csv with columns:
@@ -20,9 +15,7 @@ Optional features:
 from __future__ import annotations
 
 import argparse
-import math
 import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -32,25 +25,15 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-# Optional dependencies (script remains runnable without them).
-# NOTE: matplotlib is imported lazily (inside plotting helpers) to allow
-# setting cache/config directories to writable paths on locked-down systems.
-plt = None  # type: ignore
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import StandardScaler
 
-try:
-    from sklearn.model_selection import TimeSeriesSplit  # type: ignore
-    from sklearn.preprocessing import StandardScaler  # type: ignore
-except Exception:  # pragma: no cover
-    TimeSeriesSplit = None  # type: ignore
-    StandardScaler = None  # type: ignore
+# matplotlib is imported lazily for environments w/ locked caches.
+plt = None  # type: ignore
 
 
 def _get_plt(outdir: Path):
-    """
-    Lazy matplotlib import with a writable config/cache directory.
-    This avoids crashes when the default matplotlib/fontconfig cache paths
-    are not writable (common in sandboxed environments).
-    """
+    """Lazy matplotlib import with a writable cache dir."""
     global plt
     if plt is not None:
         return plt
@@ -73,56 +56,6 @@ def _get_plt(outdir: Path):
         return None
 
 
-class _NumpyStandardScaler:
-    def __init__(self):
-        self.mean_: Optional[np.ndarray] = None
-        self.scale_: Optional[np.ndarray] = None
-
-    def fit(self, X: np.ndarray) -> "_NumpyStandardScaler":
-        self.mean_ = X.mean(axis=0, keepdims=True)
-        self.scale_ = X.std(axis=0, keepdims=True)
-        self.scale_ = np.where(self.scale_ == 0, 1.0, self.scale_)
-        return self
-
-    def transform(self, X: np.ndarray) -> np.ndarray:
-        if self.mean_ is None or self.scale_ is None:
-            raise RuntimeError("Scaler not fit.")
-        return (X - self.mean_) / self.scale_
-
-    def fit_transform(self, X: np.ndarray) -> np.ndarray:
-        return self.fit(X).transform(X)
-
-    def inverse_transform(self, X: np.ndarray) -> np.ndarray:
-        if self.mean_ is None or self.scale_ is None:
-            raise RuntimeError("Scaler not fit.")
-        return X * self.scale_ + self.mean_
-
-
-def _time_series_splits(n: int, n_splits: int) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """
-    Lightweight fallback for TimeSeriesSplit:
-    - expanding train window
-    - contiguous validation block
-    """
-    if n_splits < 2:
-        raise ValueError("n_splits must be >= 2")
-    fold_size = n // (n_splits + 1)
-    if fold_size <= 0:
-        raise ValueError("Not enough samples for the requested number of splits.")
-
-    splits = []
-    for k in range(1, n_splits + 1):
-        train_end = fold_size * k
-        val_start = train_end
-        val_end = min(val_start + fold_size, n)
-        if val_end - val_start <= 1:
-            break
-        train_idx = np.arange(0, train_end)
-        val_idx = np.arange(val_start, val_end)
-        splits.append((train_idx, val_idx))
-    return splits
-
-
 # -----------------------------
 # Reproducibility
 # -----------------------------
@@ -135,38 +68,21 @@ def set_seed(seed: int = 0) -> None:
 # -----------------------------
 # Data utilities
 # -----------------------------
-def _pick_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    lower_map = {c.lower(): c for c in df.columns}
-    for cand in candidates:
-        if cand in df.columns:
-            return cand
-        if cand.lower() in lower_map:
-            return lower_map[cand.lower()]
-    return None
-
-
 def load_aep_dataframe(csv_path: Path) -> pd.DataFrame:
+    """
+    Project-specific loader.
+    Expects exactly the columns in data/AEP_hourly.csv:
+      - Datetime
+      - AEP_MW
+    """
     df = pd.read_csv(csv_path)
+    if "Datetime" not in df.columns or "AEP_MW" not in df.columns:
+        raise ValueError(f"Expected columns ['Datetime','AEP_MW'], got {list(df.columns)}")
 
-    dt_col = _pick_column(df, ["Datetime", "DATE", "date", "timestamp", "Timestamp"])
-    if dt_col is not None:
-        df[dt_col] = pd.to_datetime(df[dt_col], errors="coerce", utc=False)
-        df = df.sort_values(dt_col).reset_index(drop=True)
-        df = df.set_index(dt_col)
-    else:
-        # If no explicit datetime column, keep row order but ensure deterministic index.
-        df = df.reset_index(drop=True)
-
-    target_col = _pick_column(df, ["AEP_MW", "MW", "load", "Load", "TARGET"])
-    if target_col is None:
-        raise ValueError(
-            "Could not find target column. Expected something like 'AEP_MW'. "
-            f"Columns: {list(df.columns)}"
-        )
-
-    df = df.rename(columns={target_col: "AEP_MW"})
-    df = df[~df["AEP_MW"].isna()].copy()
-
+    df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
+    df = df.dropna(subset=["Datetime", "AEP_MW"]).copy()
+    df = df.sort_values("Datetime").set_index("Datetime")
+    df["AEP_MW"] = df["AEP_MW"].astype("float32")
     return df
 
 
@@ -233,28 +149,6 @@ def make_sequences(
         xs.append(X[i : i + seq_len])
         ys.append(y[i + seq_len])
     return np.stack(xs).astype("float32"), np.asarray(ys, dtype="float32")
-
-
-def synthetic_fallback(n: int = 3000) -> pd.DataFrame:
-    """
-    Generates a small, realistic-ish hourly load series.
-    This is ONLY used if the real dataset isn't present, so the script stays runnable.
-    """
-    idx = pd.date_range("2016-01-01", periods=n, freq="H")
-    hour = idx.hour.values
-    doy = idx.dayofyear.values
-
-    base = 15000.0
-    daily = 1200.0 * np.sin(2 * np.pi * hour / 24.0)
-    yearly = 2000.0 * np.sin(2 * np.pi * doy / 365.25)
-    noise = 300.0 * np.random.randn(n)
-
-    mw = base + daily + yearly + noise
-    df = pd.DataFrame(
-        {"AEP_MW": mw.astype("float32")},
-        index=idx,
-    )
-    return df
 
 
 # -----------------------------
@@ -391,16 +285,8 @@ def walk_forward_validate(
     y_raw: np.ndarray,
     cfg: TrainConfig,
 ) -> Dict[str, object]:
-    """
-    Critical anti-leakage rule:
-      - Fit scalers ONLY on the training segment of each split.
-      - Then transform train and validation with those scalers.
-      - Create sequences AFTER scaling, within each split.
-    """
-    if TimeSeriesSplit is not None:
-        splits = list(TimeSeriesSplit(n_splits=cfg.splits).split(X_raw))
-    else:
-        splits = _time_series_splits(len(X_raw), cfg.splits)
+    """Walk-forward validation; scaler is fit on train split only."""
+    splits = list(TimeSeriesSplit(n_splits=cfg.splits).split(X_raw))
 
     fold_metrics = []
     last_fold = {}
@@ -409,12 +295,8 @@ def walk_forward_validate(
         X_train_raw, y_train_raw = X_raw[train_idx], y_raw[train_idx]
         X_val_raw, y_val_raw = X_raw[val_idx], y_raw[val_idx]
 
-        if StandardScaler is not None:
-            x_scaler = StandardScaler()
-            y_scaler = StandardScaler()
-        else:
-            x_scaler = _NumpyStandardScaler()
-            y_scaler = _NumpyStandardScaler()
+        x_scaler = StandardScaler()
+        y_scaler = StandardScaler()
 
         X_train = x_scaler.fit_transform(X_train_raw)
         X_val = x_scaler.transform(X_val_raw)
@@ -497,7 +379,6 @@ def plot_loss_curve(history: Dict[str, List[float]], out_path: Path, outdir: Pat
 # -----------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="LSTM walk-forward validation for hourly energy forecasting.")
-    p.add_argument("--csv", type=str, default="data/AEP_hourly.csv", help="Path to PJM AEP hourly CSV.")
     p.add_argument("--seq-len", type=int, default=24, help="Sequence length in hours.")
     p.add_argument("--splits", type=int, default=5, help="Walk-forward folds (TimeSeriesSplit).")
     p.add_argument("--epochs", type=int, default=8, help="Epochs per fold.")
@@ -508,11 +389,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="auto", help="auto, cpu, cuda, mps (if available).")
     p.add_argument("--add-time-features", action="store_true", help="Add sin/cos time features from timestamp.")
     p.add_argument("--outdir", type=str, default="outputs", help="Output directory for plots.")
-    p.add_argument(
-        "--simulate-metrics",
-        action="store_true",
-        help="If dataset isn't found, still print a placeholder RMSE/MAE template line.",
-    )
     return p.parse_args()
 
 
@@ -520,14 +396,14 @@ def main() -> None:
     args = parse_args()
     set_seed(0)
 
-    csv_path = Path(args.csv)
+    csv_path = Path("data/AEP_hourly.csv")
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    if csv_path.exists():
-        df = load_aep_dataframe(csv_path)
-    else:
-        df = synthetic_fallback()
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Missing dataset at {csv_path}.")
+
+    df = load_aep_dataframe(csv_path)
 
     if args.add_time_features:
         df = maybe_add_time_features(df)
@@ -566,15 +442,6 @@ def main() -> None:
         else:
             print("\nmatplotlib not available; skipping plot file generation.")
             print("To enable plots: pip install matplotlib")
-
-    if (not csv_path.exists()) and args.simulate_metrics:
-        # Template line for the report when your teammate's earlier results are referenced.
-        print(
-            "\n[Template] If using the real PJM AEP dataset, report something like:\n"
-            "  RMSE = <value> MW, MAE = <value> MW (walk-forward TimeSeriesSplit)\n"
-            "Replace <value> with your run outputs on AEP_hourly.csv."
-        )
-
 
 if __name__ == "__main__":
     main()

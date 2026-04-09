@@ -4,12 +4,7 @@ Predictive modeling of **hourly energy consumption (MW)** using gated recurrent 
 
 ## Running `model_update.py`
 
-`model_update.py` is the “halfway update” training/evaluation script. It:
-- builds next-hour forecasting sequences,
-- trains an LSTM,
-- evaluates via walk-forward validation (time-series splits),
-- reports **RMSE** and **MAE**,
-- optionally saves plots (predicted vs. actual, loss curve).
+`model_update.py` trains an LSTM to predict the next hour’s `AEP_MW` and evaluates with walk-forward splits. It prints RMSE/MAE and can save a couple plots.
 
 ### Expected CSV location
 - **Default**: `data/AEP_hourly.csv`
