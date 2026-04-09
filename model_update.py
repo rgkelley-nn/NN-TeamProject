@@ -18,7 +18,7 @@ import argparse
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -87,7 +87,6 @@ def load_aep_dataframe(csv_path: Path) -> pd.DataFrame:
 
 
 def maybe_add_time_features(df: pd.DataFrame) -> pd.DataFrame:
-    # Adds seasonality signals that are safe (derived from timestamp only).
     if isinstance(df.index, pd.DatetimeIndex):
         out = df.copy()
         hour = out.index.hour.values
@@ -152,50 +151,39 @@ def make_sequences(
 
 
 # -----------------------------
-# Model: explicit LSTM cell w/ c(t)
+# Model
 # -----------------------------
 class LSTMForecaster(nn.Module):
     """
-    A simple forecaster using an explicit LSTMCell loop so we can track c(t).
-
     Input:  (B, T, F)
     Output: (B, 1)
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int, dropout: float = 0.0):
+    def __init__(self, input_dim: int, hidden_dim: int, dropout: float = 0.0, num_layers: int = 1):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
 
-        self.cell = nn.LSTMCell(input_dim, hidden_dim)
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+        )
         self.head = nn.Linear(hidden_dim, 1)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        h0: Optional[torch.Tensor] = None,
-        c0: Optional[torch.Tensor] = None,
-        return_states: bool = False,
-    ):
+    def forward(self, x: torch.Tensor):
         # x: (B, T, F)
-        b, t, _ = x.shape
+        b = x.size(0)
         device = x.device
 
-        h_t = h0 if h0 is not None else torch.zeros(b, self.hidden_dim, device=device)
-        c_t = c0 if c0 is not None else torch.zeros(b, self.hidden_dim, device=device)
+        h0 = torch.zeros(self.num_layers, b, self.hidden_dim, device=device)
+        c0 = torch.zeros(self.num_layers, b, self.hidden_dim, device=device)
 
-        c_hist = []  # track c(t) over time
-        for i in range(t):
-            h_t, c_t = self.cell(x[:, i, :], (h_t, c_t))
-            c_hist.append(c_t)
-
-        h_t = self.dropout(h_t)
-        y_hat = self.head(h_t)  # (B, 1)
-
-        if return_states:
-            c_seq = torch.stack(c_hist, dim=1)  # (B, T, H)
-            return y_hat, h_t, c_t, c_seq
+        out, (_hn, _cn) = self.lstm(x, (h0, c0))  # out: (B, T, H)
+        y_hat = self.head(out[:, -1, :])  # last time step
         return y_hat
 
 
