@@ -28,7 +28,7 @@ Run on the real dataset with time-derived seasonality features:
 
 ```bash
 source .venv/bin/activate
-python model_update.py --csv data/AEP_hourly.csv --add-time-features --epochs 1 --splits 3 --seq-len 24
+python model_update.py --add-time-features --epochs 1 --splits 3 --seq-len 24
 ```
 
 Outputs:
