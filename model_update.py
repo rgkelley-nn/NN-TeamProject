@@ -236,12 +236,9 @@ def train_one_fold(
     X_val: np.ndarray,
     y_val: np.ndarray,
     cfg: TrainConfig,
+    device
 ) -> Tuple[Dict[str, List[float]], np.ndarray]:
-    device = (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if cfg.device == "auto"
-        else torch.device(cfg.device)
-    )
+    
 
     model = LSTMForecaster(input_dim=X_train.shape[-1], hidden_dim=cfg.hidden_dim, dropout=cfg.dropout).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
@@ -277,7 +274,7 @@ def train_one_fold(
     model.eval()
     with torch.no_grad():
         val_pred = model(Xva).detach().cpu().numpy().reshape(-1)
-    return history, val_pred
+    return history, val_pred, model
 
 
 def walk_forward_validate(
@@ -290,6 +287,12 @@ def walk_forward_validate(
 
     fold_metrics = []
     last_fold = {}
+    models = []
+    device = (
+        torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if cfg.device == "auto"
+        else torch.device(cfg.device)
+    )
 
     for fold, (train_idx, val_idx) in enumerate(splits, start=1):
         X_train_raw, y_train_raw = X_raw[train_idx], y_raw[train_idx]
@@ -308,7 +311,8 @@ def walk_forward_validate(
         Xtr_seq, ytr_seq = make_sequences(X_train, y_train, cfg.seq_len)
         Xva_seq, yva_seq = make_sequences(X_val, y_val, cfg.seq_len)
 
-        history, yva_pred_scaled = train_one_fold(Xtr_seq, ytr_seq, Xva_seq, yva_seq, cfg)
+        history, yva_pred_scaled, tempModel = train_one_fold(Xtr_seq, ytr_seq, Xva_seq, yva_seq, cfg, device)
+        models.append(tempModel)
 
         # Inverse-transform predictions to MW space for metrics/plots.
         yva_pred = y_scaler.inverse_transform(yva_pred_scaled.reshape(-1, 1)).reshape(-1)
@@ -328,13 +332,26 @@ def walk_forward_validate(
 
     rmse_mean = float(np.mean([m["rmse"] for m in fold_metrics]))
     mae_mean = float(np.mean([m["mae"] for m in fold_metrics]))
+    totalModel = LSTMForecaster(input_dim=X_train.shape[-1], hidden_dim=cfg.hidden_dim, dropout=cfg.dropout).to(device)
+
+    states = totalModel.state_dict()
+    for i in states:
+        b = None
+        for g in models:
+            if (b == None):
+                b = g[i]
+            else:
+                b += g[i]
+        states[i] = b/len(models)
+    totalModel.load_state_dict(states)
+
 
     return {
         "fold_metrics": fold_metrics,
         "rmse_mean": rmse_mean,
         "mae_mean": mae_mean,
         "last_fold": last_fold,
-    }
+    }, totalModel
 
 
 # -----------------------------
@@ -421,7 +438,10 @@ def main() -> None:
         device=args.device,
     )
 
-    results = walk_forward_validate(X_raw, y_raw, cfg)
+    results, totalmod = walk_forward_validate(X_raw, y_raw, cfg)
+
+    torch.save(totalmod.state_dict(), 'currentmodel.pth')
+
 
     print("\n=== Walk-forward results (MW space) ===")
     print(f"Features used: {feature_names}")
