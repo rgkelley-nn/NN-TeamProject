@@ -269,6 +269,7 @@ def walk_forward_validate(
     X_raw: np.ndarray,
     y_raw: np.ndarray,
     cfg: TrainConfig,
+    device
 ) -> Dict[str, object]:
     """Walk-forward validation; scaler is fit on train split only."""
     splits = list(TimeSeriesSplit(n_splits=cfg.splits).split(X_raw))
@@ -276,11 +277,7 @@ def walk_forward_validate(
     fold_metrics = []
     last_fold = {}
     models = []
-    device = (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if cfg.device == "auto"
-        else torch.device(cfg.device)
-    )
+    
 
     for fold, (train_idx, val_idx) in enumerate(splits, start=1):
         X_train_raw, y_train_raw = X_raw[train_idx], y_raw[train_idx]
@@ -323,9 +320,12 @@ def walk_forward_validate(
     totalModel = LSTMForecaster(input_dim=X_train.shape[-1], hidden_dim=cfg.hidden_dim, dropout=cfg.dropout).to(device)
 
     states = totalModel.state_dict()
+    modelstates = []
+    for g in models:
+        modelstates.append(g.state_dict())
     for i in states:
         b = None
-        for g in models:
+        for g in modelstates:
             if (b == None):
                 b = g[i]
             else:
@@ -425,11 +425,35 @@ def main() -> None:
         dropout=args.dropout,
         device=args.device,
     )
+    device = (
+        torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if cfg.device == "auto"
+        else torch.device(cfg.device)
+    )
 
-    results, totalmod = walk_forward_validate(X_raw, y_raw, cfg)
+    results, totalmod = walk_forward_validate(X_raw, y_raw, cfg, device=device)
 
     torch.save(totalmod.state_dict(), 'currentmodel.pth')
 
+    # x_scaler = StandardScaler()
+    # y_scaler = StandardScaler()
+
+    # xtrans = x_scaler.fit_transform(X_raw)
+    
+    
+    # ytrans = y_scaler.fit_transform(y_raw.reshape(-1, 1)).reshape(-1)
+
+
+    # Xval = torch.from_numpy(xtrans).to(device)
+    # Yval = torch.from_numpy(ytrans).to(device).view(-1, 1)
+
+    # totalmod.eval()
+    # loss_fn = nn.MSELoss()
+    # with torch.no_grad():
+    #         val_pred = totalmod(Xval)
+    #         val_loss = loss_fn(val_pred, Yval).item()
+    # totalPath =  outdir / "predicted_vs_actual_Total.png"
+    # plot_pred_vs_actual(y_raw, val_pred, totalPath, outdir)
 
     print("\n=== Walk-forward results (MW space) ===")
     print(f"Features used: {feature_names}")
