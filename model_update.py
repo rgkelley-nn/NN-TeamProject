@@ -514,7 +514,7 @@ def main() -> None:
     plot_loss_curve(lossfold, colms, loss_path, outdir)
     for idx, i in enumerate(lossfold):
         df = pd.DataFrame(i)
-        df.to_csv(f"{colms[idx]}_loss.csg")
+        df.to_csv(f"{colms[idx]}_loss.csv")
 
 
 
