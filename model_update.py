@@ -371,13 +371,14 @@ def plot_pred_vs_actual(y_true: np.ndarray, y_pred: np.ndarray, out_path: Path, 
     _plt.close()
 
 
-def plot_loss_curve(history: Dict[str, List[float]], out_path: Path, outdir: Path) -> None:
+def plot_loss_curve(history: List[Dict[str, List[float]]], cols, out_path: Path, outdir: Path) -> None:
     _plt = _get_plt(outdir)
     if _plt is None:
         raise RuntimeError("matplotlib is not available, cannot save plots.")
     _plt.figure(figsize=(7, 4))
-    _plt.plot(history["train_mse"], label="Train MSE")
-    _plt.plot(history["val_mse"], label="Val MSE")
+    for i in history:
+        # _plt.plot(i["train_mse"], label=f"Train MSE {cols}")
+        _plt.plot(i["val_mse"], label=f"Val MSE {cols}")
     _plt.title("Loss Curve (MSE)")
     _plt.xlabel("Epoch")
     _plt.ylabel("MSE")
@@ -489,6 +490,7 @@ def main() -> None:
 
 
     print("\n=== Walk-forward results (MW space) ===")
+    lossfold = []
     for rdx, results in enumerate(allResults):
         print(f"Features used: {feature_names}")
         for m in results["fold_metrics"]:
@@ -501,14 +503,22 @@ def main() -> None:
             loss_path = outdir / f"loss_curve{colms[rdx]}.png"
             if _get_plt(outdir) is not None:
                 plot_pred_vs_actual(lf["y_true"], lf["y_pred"], pred_path, outdir)
-                plot_loss_curve(lf["history"], loss_path, outdir)
+                # plot_loss_curve(lf["history"], loss_path, outdir)
                 print(f"\nSaved plots:")
                 print(f"- Predicted vs Actual: {pred_path}")
-                print(f"- Loss curve:         {loss_path}")
+                # print(f"- Loss curve:         {loss_path}")
             else:
                 print("\nmatplotlib not available; skipping plot file generation.")
                 print("To enable plots: pip install matplotlib")
+        lossfold.append(lf["history"])
+    plot_loss_curve(lossfold, colms, loss_path, outdir)
+    for idx, i in enumerate(lossfold):
+        df = pd.DataFrame(i)
+        df.to_csv(f"{colms[idx]}_loss.csg")
 
+
+
+    
 if __name__ == "__main__":
     main()
 
