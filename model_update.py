@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import glob
+from string import printable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -68,7 +70,7 @@ def set_seed(seed: int = 0) -> None:
 # -----------------------------
 # Data utilities
 # -----------------------------
-def load_aep_dataframe(csv_path: Path) -> pd.DataFrame:
+def load_aep_dataframe(csv_path) -> pd.DataFrame:
     """
     Project-specific loader.
     Expects exactly the columns in data/AEP_hourly.csv:
@@ -76,13 +78,17 @@ def load_aep_dataframe(csv_path: Path) -> pd.DataFrame:
       - AEP_MW
     """
     df = pd.read_csv(csv_path)
-    if "Datetime" not in df.columns or "AEP_MW" not in df.columns:
+    if "Datetime" not in df.columns or  len(df.columns) != 2:
         raise ValueError(f"Expected columns ['Datetime','AEP_MW'], got {list(df.columns)}")
-
+    MW_col = ""
+    for c in df.columns:
+        if c != "Datetime":
+            MW_col = c
     df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
-    df = df.dropna(subset=["Datetime", "AEP_MW"]).copy()
+    
+    df = df.dropna(subset=["Datetime", c]).copy()
     df = df.sort_values("Datetime").set_index("Datetime")
-    df["AEP_MW"] = df["AEP_MW"].astype("float32")
+    df[c] = df[c].astype("float32")
     return df
 
 
@@ -269,6 +275,7 @@ def walk_forward_validate(
     X_raw: np.ndarray,
     y_raw: np.ndarray,
     cfg: TrainConfig,
+    device
 ) -> Dict[str, object]:
     """Walk-forward validation; scaler is fit on train split only."""
     splits = list(TimeSeriesSplit(n_splits=cfg.splits).split(X_raw))
@@ -276,11 +283,7 @@ def walk_forward_validate(
     fold_metrics = []
     last_fold = {}
     models = []
-    device = (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if cfg.device == "auto"
-        else torch.device(cfg.device)
-    )
+    
 
     for fold, (train_idx, val_idx) in enumerate(splits, start=1):
         X_train_raw, y_train_raw = X_raw[train_idx], y_raw[train_idx]
@@ -401,19 +404,32 @@ def main() -> None:
     args = parse_args()
     set_seed(0)
 
-    csv_path = Path("data/AEP_hourly.csv")
+    
+
+
+    # csv_paths = Path("data/")
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Missing dataset at {csv_path}.")
+    path = "data/"
+    extension = 'csv'
+    os.chdir(path)
+    result = glob.glob('*.{}'.format(extension))
+    os.chdir("..")
 
-    df = load_aep_dataframe(csv_path)
+    # if not csv_paths.exists():
+    #     raise FileNotFoundError(f"Missing dataset at {csv_paths}.")
+    
+    dataframes = []
+    for csv in result:
+        print(csv)
+        
+        # new_string = "".join(char for char in (path.join(csv)) if char in printable)
+        # print(path.join(csv))
+        dataframes.append(load_aep_dataframe(path+csv))
+    print(len(dataframes))
 
-    if args.add_time_features:
-        df = maybe_add_time_features(df)
-
-    X_raw, y_raw, feature_names = build_feature_matrix(df)
+    raise ValueError("just testing file loading")
 
     cfg = TrainConfig(
         seq_len=args.seq_len,
@@ -425,8 +441,22 @@ def main() -> None:
         dropout=args.dropout,
         device=args.device,
     )
+    device = (
+        torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if cfg.device == "auto"
+        else torch.device(cfg.device)
+    )
 
-    results, totalmod = walk_forward_validate(X_raw, y_raw, cfg)
+
+    if args.add_time_features:
+        df = maybe_add_time_features(df)
+
+    X_raw, y_raw, feature_names = build_feature_matrix(df)
+
+    
+
+    totalModel = LSTMForecaster(input_dim=X_train.shape[-1], hidden_dim=cfg.hidden_dim, dropout=cfg.dropout).to(device)
+    results, model = walk_forward_validate(X_raw, y_raw, cfg)
 
     torch.save(totalmod.state_dict(), 'currentmodel.pth')
 
