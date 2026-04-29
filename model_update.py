@@ -89,7 +89,7 @@ def load_aep_dataframe(csv_path) -> pd.DataFrame:
     df = df.dropna(subset=["Datetime", c]).copy()
     df = df.sort_values("Datetime").set_index("Datetime")
     df[c] = df[c].astype("float32")
-    return df
+    return df, c
 
 
 def maybe_add_time_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -109,7 +109,7 @@ def maybe_add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def build_feature_matrix(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+def build_feature_matrix(df: pd.DataFrame, MWcol) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """
     Returns:
       X_raw: shape (N, num_features)
@@ -118,7 +118,7 @@ def build_feature_matrix(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, List
     """
     df = df.copy()
 
-    feature_cols: List[str] = ["AEP_MW"]
+    feature_cols: List[str] = [MWcol]
 
     # Keep derived time features if they exist.
     for c in ["hour_sin", "hour_cos", "dow_sin", "dow_cos", "doy_sin", "doy_cos"]:
@@ -126,7 +126,7 @@ def build_feature_matrix(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, List
             feature_cols.append(c)
 
     X_raw = df[feature_cols].astype("float32").to_numpy()
-    y_raw = df["AEP_MW"].astype("float32").to_numpy()
+    y_raw = df[MWcol].astype("float32").to_numpy()
     return X_raw, y_raw, feature_cols
 
 
@@ -275,9 +275,14 @@ def walk_forward_validate(
     X_raw: np.ndarray,
     y_raw: np.ndarray,
     cfg: TrainConfig,
-    device
 ) -> Dict[str, object]:
     """Walk-forward validation; scaler is fit on train split only."""
+
+    device = (
+        torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if cfg.device == "auto"
+        else torch.device(cfg.device)
+    )
     splits = list(TimeSeriesSplit(n_splits=cfg.splits).split(X_raw))
 
     fold_metrics = []
@@ -330,9 +335,9 @@ def walk_forward_validate(
         b = None
         for g in models:
             if (b == None):
-                b = g[i]
+                b = g.state_dict()[i]
             else:
-                b += g[i]
+                b += g.state_dict()[i]
         states[i] = b/len(models)
     totalModel.load_state_dict(states)
 
@@ -411,25 +416,32 @@ def main() -> None:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    path = "data/"
+    path = "data/energyData/"
     extension = 'csv'
     os.chdir(path)
     result = glob.glob('*.{}'.format(extension))
+    os.chdir("..")
     os.chdir("..")
 
     # if not csv_paths.exists():
     #     raise FileNotFoundError(f"Missing dataset at {csv_paths}.")
     
     dataframes = []
+    colms = []
     for csv in result:
         print(csv)
         
         # new_string = "".join(char for char in (path.join(csv)) if char in printable)
         # print(path.join(csv))
-        dataframes.append(load_aep_dataframe(path+csv))
+        dft, colt = load_aep_dataframe(path+csv)
+        dataframes.append(dft)
+        colms.append(colt)
     print(len(dataframes))
 
-    raise ValueError("just testing file loading")
+    # raise ValueError("just testing file loading")
+
+    
+
 
     cfg = TrainConfig(
         seq_len=args.seq_len,
@@ -441,45 +453,61 @@ def main() -> None:
         dropout=args.dropout,
         device=args.device,
     )
-    device = (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if cfg.device == "auto"
-        else torch.device(cfg.device)
-    )
-
-
-    if args.add_time_features:
-        df = maybe_add_time_features(df)
-
-    X_raw, y_raw, feature_names = build_feature_matrix(df)
+    
 
     
 
-    totalModel = LSTMForecaster(input_dim=X_train.shape[-1], hidden_dim=cfg.hidden_dim, dropout=cfg.dropout).to(device)
-    results, model = walk_forward_validate(X_raw, y_raw, cfg)
+    allResults = []
 
-    torch.save(totalmod.state_dict(), 'currentmodel.pth')
+    if args.add_time_features:
+        dataframes[0] = maybe_add_time_features(dataframes[0])
+
+    X_raw, y_raw, feature_names = build_feature_matrix(dataframes[0], colms[0])
+
+    results, totalModel = walk_forward_validate(X_raw, y_raw, cfg)
+    allResults.append(results)
+
+    for i in range(1,len(dataframes)):
+        print(f"starting {i}")
+        if args.add_time_features:
+            dataframes[i] = maybe_add_time_features(dataframes[i])
+        
+        X_raw, y_raw, feature_names = build_feature_matrix(dataframes[i], colms[i])
+
+        results, Model = walk_forward_validate(X_raw, y_raw, cfg)
+        states = totalModel.state_dict()
+        statesn = Model.state_dict()
+        for i in states:
+            states[i] += statesn[i]
+            states[i] = states[i]/2
+        totalModel.load_state_dict(states)
+        allResults.append(results)
+    
+    
+    torch.save(totalModel.state_dict(), 'currentmodel.pth')
+
 
 
     print("\n=== Walk-forward results (MW space) ===")
-    print(f"Features used: {feature_names}")
-    for m in results["fold_metrics"]:
-        print(f"Fold {m['fold']:>2}: RMSE={m['rmse']:.2f} MW | MAE={m['mae']:.2f} MW")
-    print(f"\nMean: RMSE={results['rmse_mean']:.2f} MW | MAE={results['mae_mean']:.2f} MW")
+    for rdx, results in enumerate(allResults):
+        print(f"Features used: {feature_names}")
+        for m in results["fold_metrics"]:
+            print(f"Fold {m['fold']:>2}: RMSE={m['rmse']:.2f} MW | MAE={m['mae']:.2f} MW")
+        print(f"\nMean: RMSE={results['rmse_mean']:.2f} MW | MAE={results['mae_mean']:.2f} MW")
 
-    lf = results["last_fold"]
-    if lf:
-        pred_path = outdir / "predicted_vs_actual.png"
-        loss_path = outdir / "loss_curve.png"
-        if _get_plt(outdir) is not None:
-            plot_pred_vs_actual(lf["y_true"], lf["y_pred"], pred_path, outdir)
-            plot_loss_curve(lf["history"], loss_path, outdir)
-            print(f"\nSaved plots:")
-            print(f"- Predicted vs Actual: {pred_path}")
-            print(f"- Loss curve:         {loss_path}")
-        else:
-            print("\nmatplotlib not available; skipping plot file generation.")
-            print("To enable plots: pip install matplotlib")
+        lf = results["last_fold"]
+        if lf:
+            pred_path = outdir / f"predicted_vs_actual{colms[rdx]}.png"
+            loss_path = outdir / f"loss_curve{colms[rdx]}.png"
+            if _get_plt(outdir) is not None:
+                plot_pred_vs_actual(lf["y_true"], lf["y_pred"], pred_path, outdir)
+                plot_loss_curve(lf["history"], loss_path, outdir)
+                print(f"\nSaved plots:")
+                print(f"- Predicted vs Actual: {pred_path}")
+                print(f"- Loss curve:         {loss_path}")
+            else:
+                print("\nmatplotlib not available; skipping plot file generation.")
+                print("To enable plots: pip install matplotlib")
 
 if __name__ == "__main__":
     main()
